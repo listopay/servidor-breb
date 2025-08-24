@@ -151,13 +151,13 @@ app.post('/api/v1/notify', async (req, res) => {
 // --- RUTAS DE LAS PÁGINAS ---
 app.get('/', (req, res) => {
     if (req.session.userId) return res.redirect('/dashboard');
-    // **CORRECCIÓN:** Añadimos la cabecera Content-Type
+    // **CORRECCIÓN:** Añadimos la cabecera Content-Type para que el navegador sepa que es una página web.
     res.setHeader('Content-Type', 'text/html');
     res.sendFile(path.join(__dirname, 'login.html'));
 });
 
 app.get('/dashboard', requireLogin, (req, res) => {
-    // **CORRECCIÓN:** Añadimos la cabecera Content-Type
+    // **CORRECCIÓN:** Añadimos la cabecera Content-Type.
     res.setHeader('Content-Type', 'text/html');
     res.sendFile(path.join(__dirname, 'dashboard.html'));
 });
