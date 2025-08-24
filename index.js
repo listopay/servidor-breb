@@ -222,4 +222,3 @@ app.listen(PORT, () => {
    created_at TIMESTAMPTZ DEFAULT now()
  );
 */
-
