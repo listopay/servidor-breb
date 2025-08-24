@@ -49,8 +49,12 @@ if (MQTT_HOST) {
 
 // --- LÓGICA PARA EL DASHBOARD EN TIEMPO REAL (Server-Sent Events) ---
 let clients = [];
-const sendEventToClients = (data) => {
-    clients.forEach(client => client.res.write(`data: ${JSON.stringify(data)}\n\n`));
+const sendEventToClients = (userId, data) => {
+    clients.forEach(client => {
+        if (client.userId === userId) {
+            client.res.write(`data: ${JSON.stringify(data)}\n\n`);
+        }
+    });
 };
 
 // Middleware para proteger rutas
@@ -94,8 +98,6 @@ app.post('/api/v1/notify', async (req, res) => {
     console.log('¡Notificación de Passport recibida!');
     console.log('Payload:', JSON.stringify(req.body, null, 2));
     
-    // Aquí puedes añadir la lógica para verificar el secret token de Passport
-
     const eventType = req.body.event_type;
     if (eventType === 'transaction.completed') {
         const transactionData = req.body.data;
@@ -103,17 +105,28 @@ app.post('/api/v1/notify', async (req, res) => {
         const amount = transactionData.amount;
         const transactionId = transactionData.id || new Date().getTime().toString();
 
-        // Guardar en la base de datos (asumiendo que el webhook no provee el user_id)
-        // En un sistema real, necesitarías una forma de asociar deviceSerialNumber con un user_id
-        const { error } = await supabase.from('transactions').insert([{
+        const { data: deviceOwner, error: ownerError } = await supabase
+            .from('devices')
+            .select('user_id')
+            .eq('serial_number', deviceSerialNumber)
+            .single();
+
+        if (ownerError || !deviceOwner) {
+            console.error(`Error: No se encontró un dueño para el dispositivo ${deviceSerialNumber}`);
+            return res.status(404).send('Dispositivo no registrado.');
+        }
+
+        const userId = deviceOwner.user_id;
+
+        const { error: trxError } = await supabase.from('transactions').insert([{
+            user_id: userId,
             device_serial_number: deviceSerialNumber,
             amount: amount,
             request_id: transactionId,
             status: 'Completada'
         }]);
-        if(error) console.error("Error guardando transacción:", error.message);
+        if(trxError) console.error("Error guardando transacción:", trxError.message);
 
-        // 1. Enviar notificación al dashboard web
         const dashboardData = {
             id: transactionId,
             device: deviceSerialNumber,
@@ -121,9 +134,8 @@ app.post('/api/v1/notify', async (req, res) => {
             status: 'Completada',
             timestamp: new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' })
         };
-        sendEventToClients(dashboardData);
+        sendEventToClients(userId, dashboardData);
 
-        // 2. Publicar el mensaje en el tópico MQTT para el dispositivo de voz
         if (mqttClient && mqttClient.connected) {
             const topic = `/HMZN/${deviceSerialNumber}`;
             const message = JSON.stringify({ request_id: transactionId, money: String(amount) });
@@ -139,11 +151,26 @@ app.post('/api/v1/notify', async (req, res) => {
 // --- RUTAS DE LAS PÁGINAS ---
 app.get('/', (req, res) => {
     if (req.session.userId) return res.redirect('/dashboard');
+    // **CORRECCIÓN:** Añadimos la cabecera Content-Type
+    res.setHeader('Content-Type', 'text/html');
     res.sendFile(path.join(__dirname, 'login.html'));
 });
 
 app.get('/dashboard', requireLogin, (req, res) => {
+    // **CORRECCIÓN:** Añadimos la cabecera Content-Type
+    res.setHeader('Content-Type', 'text/html');
     res.sendFile(path.join(__dirname, 'dashboard.html'));
+});
+
+app.get('/api/transactions', requireLogin, async (req, res) => {
+    const { data, error } = await supabase
+        .from('transactions')
+        .select('*')
+        .eq('user_id', req.session.userId)
+        .order('created_at', { ascending: false });
+
+    if (error) return res.status(500).json({ error: 'Error al obtener transacciones' });
+    res.json(data);
 });
 
 app.get('/events', requireLogin, (req, res) => {
@@ -153,8 +180,8 @@ app.get('/events', requireLogin, (req, res) => {
     res.flushHeaders();
 
     const clientId = Date.now();
-    clients.push({ id: clientId, res });
-    console.log(`Nuevo cliente [${clientId}] conectado al dashboard.`);
+    clients.push({ id: clientId, userId: req.session.userId, res });
+    console.log(`Nuevo cliente [${clientId}] del usuario [${req.session.userEmail}] conectado al dashboard.`);
 
     req.on('close', () => {
         clients = clients.filter(c => c.id !== clientId);
@@ -166,3 +193,32 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Servidor escuchando en http://localhost:${PORT}`);
 });
+
+/*
+ ** NUEVA ESTRUCTURA DE TABLAS EN SUPABASE **
+ 
+ CREATE TABLE users (
+   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+   email TEXT UNIQUE NOT NULL,
+   password_hash TEXT NOT NULL,
+   created_at TIMESTAMPTZ DEFAULT now()
+ );
+ 
+ CREATE TABLE devices (
+    id BIGSERIAL PRIMARY KEY,
+    serial_number TEXT UNIQUE NOT NULL,
+    user_id UUID REFERENCES users(id) NOT NULL,
+    status TEXT DEFAULT 'offline',
+    created_at TIMESTAMPTZ DEFAULT now()
+ );
+
+ CREATE TABLE transactions (
+   id BIGSERIAL PRIMARY KEY,
+   user_id UUID REFERENCES users(id),
+   device_serial_number TEXT,
+   amount NUMERIC,
+   request_id TEXT UNIQUE,
+   status TEXT,
+   created_at TIMESTAMPTZ DEFAULT now()
+ );
+*/
